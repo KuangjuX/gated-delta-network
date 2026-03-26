@@ -16,14 +16,13 @@ GDN decode processes one token per step with a recurrent state update:
 
 ```
 For each (batch, v_head, v_tile):
-  g = -exp(A_log) * softplus(a + dt_bias)
+  g = exp(-exp(A_log) * softplus(a + dt_bias))  -- decay factor
   beta = sigmoid(b)
-  L2-normalize q, k; apply scale to q
-  h *= exp(g)            -- decay [V_tile, K] state
+  h *= g                 -- decay [V_tile, K] state
   pred = h @ k           -- dot products
   v_new = (v - pred)*beta -- delta rule + gate
   h += outer(v_new, k)   -- rank-1 update
-  out = h @ q            -- readout
+  out = scale * h @ q    -- readout
 ```
 
 ### 1.2 Roofline Analysis
@@ -104,7 +103,7 @@ The prefill kernel went through three major algorithmic phases:
    - O(T/C * C^2) work with parallelism vs O(T*K) sequential per-program
 
 2. **Fused precompute Triton kernel** (608us → 350us, 1.74x):
-   - Single Triton kernel fuses 20+ PyTorch ops: gating computation (A_log, a, dt_bias → g), sigmoid (b → beta), L2 normalization (q, k), GVA head expansion (repeat_interleave, H=4 → HV=8)
+   - Single Triton kernel fuses 20+ PyTorch ops: gating computation (A_log, a, dt_bias -> g), sigmoid (b -> beta), GVA head expansion (repeat_interleave, H=4 -> HV=8)
    - Reduced precompute from 155us to 11us (13.8x reduction)
 
 3. **Direct chunk_gated_delta_rule_fwd** (350us → 339us, 1.03x):
@@ -142,7 +141,7 @@ The crossover is at seq_len ≈ 200: chunked wins for longer sequences, sequenti
 
 ### 2.6 Final Implementation Details
 
-- **Fused precompute kernel:** Grid = `(total_seq_len,)`, num_warps=1. Each program handles one token: L2-normalizes q[H,K] and k[H,K], expands to HV heads, computes g and beta from (A_log, a, dt_bias, b).
+- **Fused precompute kernel:** Grid = `(total_seq_len,)`, num_warps=1. Each program handles one token: expands q[H,K] and k[H,K] to HV heads, computes g and beta from (A_log, a, dt_bias, b).
 - **Core computation:** Direct call to `fla.ops.gated_delta_rule.chunk.chunk_gated_delta_rule_fwd` — bypasses autograd wrapper.
 - **State layout:** transpose_state_layout=True → [N, HV, V, K] matching our k-last format.
 - **Dependencies:** Requires `flash-linear-attention >= 0.4.2` (`fla` package).
@@ -168,21 +167,59 @@ All implementations pass comprehensive correctness tests:
 
 ---
 
-## 5. Repository Structure
+## 5. FlashInfer-Bench Evaluation
+
+All kernels evaluated against the [FlashInfer-Bench reference implementations](https://bench.flashinfer.ai/) on NVIDIA B200.
+
+### Decode (54/54 workloads PASSED)
+
+| Batch Size | Ours | Reference | Speedup |
+|:---:|:---:|:---:|:---:|
+| 1 | 0.026 ms | 1.261 ms | **48x** |
+| 8 | 0.023 ms | 8.856 ms | **379x** |
+| 32 | 0.023 ms | 36.652 ms | **1585x** |
+| 64 | 0.023 ms | 71.081 ms | **3061x** |
+
+Average speedup across all 54 workloads: **529x** (min 24x, max 1469x).
+
+### Prefill (all configs PASSED)
+
+| Config | Ours | Reference | Speedup |
+|:---:|:---:|:---:|:---:|
+| 1x32 | 0.335 ms | 5.194 ms | **15.5x** |
+| 1x256 | 0.347 ms | 40.545 ms | **117x** |
+| 1x1024 | 0.347 ms | 160.928 ms | **464x** |
+| 4xmixed | 0.350 ms | 75.899 ms | **217x** |
+
+Average speedup: **155x** (min 15.5x, max 464x).
+
+## 6. Repository Structure
 
 ```
 gated-delta-network/
-├── gdn_decode_qk4_v8_d128_k_last/
-│   ├── config.toml
-│   └── solution/
-│       └── triton/kernel.py     # Optimized Triton decode (BLOCK_V=8, nw=1)
-├── gdn_prefill_qk4_v8_d128_k_last/
-│   ├── config.toml
-│   └── solution/
-│       └── triton/kernel.py     # Chunked prefill (FLA chunk + fused precompute)
+├── solutions/
+│   ├── gdn_decode_qk4_v8_d128_k_last/
+│   │   ├── config.toml
+│   │   └── solution/
+│   │       ├── triton/kernel.py     # Optimized Triton decode (BLOCK_V=8, nw=1)
+│   │       └── cuda/               # CUDA decode (float4 + warp reduce)
+│   └── gdn_prefill_qk4_v8_d128_k_last/
+│       ├── config.toml
+│       └── solution/
+│           ├── triton/kernel.py     # Chunked prefill (FLA chunk + fused precompute)
+│           └── cuda/kernel.py       # Blockwise PyTorch + Triton gating
+├── reference/
+│   ├── gdn_decode_ref.py            # FlashInfer-Bench official reference
+│   └── gdn_prefill_ref.py           # FlashInfer-Bench official reference
+├── scripts/
+│   ├── benchmark.py                 # Direct benchmark vs reference
+│   ├── quick_eval.py                # FlashInfer-Bench subset evaluation
+│   ├── run_local.py                 # FlashInfer-Bench full evaluation
+│   └── pack_solution.py             # Pack solution into solution.json
 ├── tests/
 │   ├── test_decode.py
+│   ├── test_cuda_decode.py
 │   └── test_prefill.py
-├── OPTIMIZATION_LOG.md          # This file
+├── OPTIMIZATION_LOG.md              # This file
 └── README.md
 ```
