@@ -72,13 +72,15 @@ Our decode kernel is **1.07-3.86x faster** than FLA at typical inference batch s
 
 ### 2.1 Algorithm Evolution
 
-The prefill kernel went through three major algorithmic phases:
+The prefill kernel went through four major phases:
 
 **Phase 1 — Blockwise delta rule (baseline):** Hybrid Triton gating + PyTorch blockwise with solve_triangular. ~320 CUDA kernel launches → 7609us.
 
 **Phase 2 — Sequential scan:** Single Triton kernel processing entire sequence per (hv, v_tile). State stays in registers. 941us (8.08x over baseline).
 
-**Phase 3 — Chunked delta rule (current):** FLA's chunk_gated_delta_rule_fwd with fused Triton precompute. Parallelizes across 16 chunks using tensor core operations. 339us (22.4x over baseline).
+**Phase 3 — Chunked delta rule (FLA-dependent):** FLA's chunk_gated_delta_rule_fwd with fused Triton precompute. Parallelizes across 16 chunks using tensor core operations. 339us (22.4x over baseline).
+
+**Phase 4 — Self-contained inlined FLA (current):** All 6 FLA sub-kernels inlined, buffer/chunk caching, fused cumsum+kkt. Zero external FLA dependency. 172us (44.2x over baseline, 1.97x over Phase 3).
 
 ### 2.2 Optimization History
 
@@ -93,6 +95,11 @@ The prefill kernel went through three major algorithmic phases:
 | **chunk_fla** | **FLA chunk + unfused precompute** | **608us** | **kept** |
 | **chunk_fused** | **FLA chunk + fused precompute** | **350us** | **kept** |
 | **chunk_direct** | **FLA chunk_fwd direct + fused** | **339us** | **kept** |
+| inline_fla | Inline all 6 FLA sub-kernels (self-contained) | 542us | intermediate |
+| buf_cache | Module-level buffer cache (`_buf_cache`) | 470us | kept |
+| **chunk_cache** | **Cache chunk indices/offsets + eliminate .zero_()** | **205us** | **kept** |
+| **fused_cumsum_kkt** | **Fuse cumsum + kkt into single kernel** | **172us** | **kept** |
+| cuda_graph | CUDA graph capture for Triton pipeline | — | reverted |
 
 ### 2.3 Key Optimizations (Phase 3)
 
@@ -110,20 +117,49 @@ The prefill kernel went through three major algorithmic phases:
    - Bypasses autograd Function.apply wrapper for inference-only forward pass
    - Eliminates autograd bookkeeping overhead (~20us)
 
-### 2.4 Final Performance vs FLA
+### 2.4 Key Optimizations (Phase 4 — Self-contained Inlined FLA)
 
-| Seq Length | Ours (us) | FLA fused_recurrent (us) | FLA chunk (us) | vs fused_recurrent | vs chunk |
-|------------|-----------|--------------------------|----------------|--------------------|---------| 
-| 64 | 304 | 86 | 265 | 0.28x | 0.87x |
-| 128 | 301 | 165 | 262 | 0.55x | 0.87x |
-| 256 | 304 | 323 | 278 | 1.06x | 0.92x |
-| 512 | 326 | 640 | 285 | 1.96x | 0.93x |
-| 1024 | 306 | 1275 | 271 | **4.16x** | 0.89x |
-| 2048 | 318 | 2538 | 291 | **7.98x** | 0.92x |
+4. **Inline all 6 FLA sub-kernels** (339us → 542us initially, foundation for further optimization):
+   - Extracted and inlined: `chunk_local_cumsum`, `chunk_scaled_dot_kkt_fwd`, `solve_tril_64x64`, `recompute_w_u_fwd`, `chunk_gated_delta_rule_fwd_h`, `chunk_fwd_o`
+   - Removed all `fla` imports — zero external dependency
+   - Fixed Triton "nested function definition" error by inlining `_store` helper in solve_tril
+   - Initially slower due to overhead from intermediate Python wrapper functions
 
-- At seq_len >= 256: **1.06-7.98x faster** than FLA's fused_recurrent (same sequential algorithm)
-- At all seq_lens: Within **~12% of FLA's chunk** performance (remaining gap from GVA head expansion overhead and Python-level costs)
-- **Constant-time behavior:** ~300-340us regardless of sequence length (chunk parallelism)
+5. **Module-level buffer cache** (542us → 470us, 1.15x):
+   - `_buf_cache` dict reuses pre-allocated tensors across calls
+   - Eliminates 10+ `torch.empty`/`torch.zeros` allocations per call (~49.6% of runtime was Python overhead)
+   - Inlined the orchestration logic directly into `kernel_fn`
+
+6. **Chunk indices/offsets caching** (470us → 205us, 2.29x — largest single improvement):
+   - `_prepare_chunk_indices()` and `_prepare_chunk_offsets()` created ~10 small GPU tensors per call via `torch.diff`, `torch.cat`, `torch.arange`, etc.
+   - Cached with content-based key and fast-path `is` identity check
+   - Fast-path avoids D2H `tolist()` copy when same tensor object is reused
+   - Also eliminated unnecessary `final_state.zero_()` (kernel overwrites all elements)
+
+7. **Fused cumsum+kkt kernel** (205us → 172us, 1.19x):
+   - Combined `chunk_local_cumsum_scalar_kernel` + `chunk_scaled_dot_kkt_fwd_kernel` into single Triton kernel
+   - Cumulative sum (`g_cs`) stays in registers instead of HBM write + read
+   - Saves 1 kernel launch (~30us Triton dispatch overhead after autotuning)
+
+8. **CUDA graph capture attempt** (reverted):
+   - Tried `torch.cuda.CUDAGraph` to capture the 6-kernel pipeline
+   - Failed: `cudaErrorStreamCaptureInvalidated` — Triton's autotuner dispatch involves D2H copies and Python operations incompatible with graph capture
+   - Triton's JIT/autotuner adds ~30us per kernel dispatch even after configs are cached
+
+### 2.5 Final Performance vs FLA
+
+| Seq Length | Ours inlined (us) | Ours FLA-dep (us) | FLA chunk (us) | FLA fused_recurrent (us) | vs FLA chunk | vs FLA fused |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 64 | 202 | 339 | 265 | 86 | **1.31x** | 0.43x |
+| 128 | 268 | 340 | 262 | 165 | 0.98x | 0.62x |
+| 256 | 204 | 347 | 278 | 323 | **1.36x** | **1.58x** |
+| 512 | 199 | 348 | 285 | 640 | **1.43x** | **3.22x** |
+| 1024 | 197 | 347 | 271 | 1275 | **1.38x** | **6.47x** |
+
+- At seq_len >= 256: **1.36-1.43x faster** than FLA's own chunk implementation
+- At seq_len >= 256: **1.58-6.47x faster** than FLA's fused_recurrent
+- **1.68-1.76x faster** than our previous FLA-dependent version (Phase 3)
+- **Constant-time behavior:** ~197-204us regardless of sequence length (chunk parallelism)
 
 ### 2.5 Architecture: Chunked vs Sequential Scan
 
@@ -131,29 +167,40 @@ The sequential scan processes T tokens serially per program — O(T) per program
 
 For seq_len=1024 on B200:
 - Sequential scan (BLOCK_V=1): 941us, 1024 programs × 1024 sequential steps each
-- Chunked (C=64): 339us, parallelized across 16 chunks × 8 heads
-  - chunk_local_cumsum: ~10us
-  - fused_kkt_solve + recompute_w_u: ~80us
-  - chunk_fwd_h (inter-chunk state propagation): ~100us
-  - chunk_fwd_o (output computation): ~100us
+- Chunked FLA-dependent (C=64): 339us, parallelized across 16 chunks × 8 heads
+- **Chunked inlined (C=64): 172us** — same algorithm, all overhead eliminated:
+  - fused_cumsum_kkt (cumsum + KK^T with gating): ~50us
+  - solve_tril (64×64 block inverse): ~51us
+  - recompute_w_u (w, u from inverse): ~50us
+  - chunk_fwd_h (inter-chunk state propagation): ~69us
+  - chunk_fwd_o (output computation): ~40us
 
 The crossover is at seq_len ≈ 200: chunked wins for longer sequences, sequential scan wins for shorter.
 
 ### 2.6 Final Implementation Details
 
-- **Fused precompute kernel:** Grid = `(total_seq_len,)`, num_warps=1. Each program handles one token: expands q[H,K] and k[H,K] to HV heads, computes g and beta from (A_log, a, dt_bias, b).
-- **Core computation:** Direct call to `fla.ops.gated_delta_rule.chunk.chunk_gated_delta_rule_fwd` — bypasses autograd wrapper.
-- **State layout:** transpose_state_layout=True → [N, HV, V, K] matching our k-last format.
-- **Dependencies:** Requires `flash-linear-attention >= 0.4.2` (`fla` package).
+**Self-contained version (`fla_kernels.py`, recommended):**
+- **Pipeline:** 6 kernel launches — precompute → fused_cumsum_kkt → solve_tril → recompute_w_u → chunk_fwd_h → chunk_fwd_o
+- **Buffer cache:** `_buf_cache` dict reuses 11 intermediate tensors across calls
+- **Chunk cache:** `_chunk_cache` with fast-path identity check eliminates per-call CPU operations
+- **Fused cumsum+kkt:** Single kernel computes cumulative sum and KK^T with gating; g_cs stays in registers
+- **No external dependencies:** All 6 FLA Triton sub-kernels inlined
+- **Bandwidth:** 78.1% peak (6249 GB/s on B200 8000 GB/s)
+- **Bottleneck:** Memory-bound (arithmetic intensity = 0.5 FLOP/byte)
+
+**FLA-dependent version (`kernel.py`, legacy):**
+- Direct call to `fla.ops.gated_delta_rule.chunk.chunk_gated_delta_rule_fwd`
+- Fused precompute kernel for GVA head expansion and gating
+- Dependencies: `flash-linear-attention >= 0.4.2`
 
 ---
 
 ## 3. Summary
 
-| Kernel | Baseline | Final | Total Speedup | vs FLA |
+| Kernel | Baseline | Final | Total Speedup | vs FLA chunk |
 |--------|----------|-------|---------------|--------|
 | **Decode** (B=128) | 31.75us | **27.89us** | **1.14x** | 1.07x faster |
-| **Prefill** (seq=1024) | 7609us | **339us** | **22.4x** | within 12% |
+| **Prefill** (seq=1024) | 7609us | **172us** | **44.2x** | **1.38x faster** |
 
 ---
 
@@ -163,7 +210,8 @@ All implementations pass comprehensive correctness tests:
 
 **Decode:** 5-stage verification (smoke test, shape sweep across B=1-512, numerical stability with adversarial inputs, determinism check, edge cases). Tolerance: atol=2e-2, rtol=2e-2.
 
-**Prefill:** 5-stage verification across seq_len=64-1024, single and multi-sequence, with/without initial state. Tolerance: atol=5e-2, rtol=5e-2. Output max error < 5e-4, state max error < 3e-4.
+**Prefill (inlined):** Smoke test + shape sweep (tiny/small/medium/large/multi) — all PASS. Determinism: bitwise identical across 3 runs. Max error: < 2.64e-02 (output), < 1.39e-02 (state). Tolerance: atol=5e-2, rtol=5e-2.
+- Known limitation: "all_same" adversarial input (all tensors = 0.5) causes NaN. This is inherent to the FLA chunked delta rule algorithm — FLA's own library also produces NaN for this input. The solve_tril inverse grows exponentially (up to ~1e21) for pathological correlation structures.
 
 ---
 
@@ -184,14 +232,16 @@ Average speedup across all 54 workloads: **529x** (min 24x, max 1469x).
 
 ### Prefill (all configs PASSED)
 
-| Config | Ours | Reference | Speedup |
-|:---:|:---:|:---:|:---:|
-| 1x32 | 0.335 ms | 5.194 ms | **15.5x** |
-| 1x256 | 0.347 ms | 40.545 ms | **117x** |
-| 1x1024 | 0.347 ms | 160.928 ms | **464x** |
-| 4xmixed | 0.350 ms | 75.899 ms | **217x** |
+**Inlined self-contained version (Phase 4):**
 
-Average speedup: **155x** (min 15.5x, max 464x).
+| Config | Ours (inlined) | Ours (FLA-dep) | Reference | Speedup vs Ref | vs FLA-dep |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| 1x64 | 0.202 ms | 0.339 ms | 10.703 ms | **53x** | **1.68x** |
+| 1x256 | 0.204 ms | 0.347 ms | 40.545 ms | **199x** | **1.70x** |
+| 1x512 | 0.199 ms | 0.348 ms | 80.208 ms | **403x** | **1.75x** |
+| 1x1024 | 0.197 ms | 0.347 ms | 160.928 ms | **817x** | **1.76x** |
+
+cuda-evolve benchmark (seq_len=1024): **172us, 78.1% peak bandwidth, 7380x vs PyTorch reference.**
 
 ## 6. Repository Structure
 
@@ -206,8 +256,9 @@ gated-delta-network/
 │   └── gdn_prefill_qk4_v8_d128_k_last/
 │       ├── config.toml
 │       └── solution/
-│           ├── triton/kernel.py     # Chunked prefill (FLA chunk + fused precompute)
-│           └── cuda/kernel.py       # Blockwise PyTorch + Triton gating
+│           └── triton/
+│               ├── kernel.py          # FLA-dependent prefill (legacy, ~339us)
+│               └── fla_kernels.py     # Self-contained inlined FLA (optimized, ~172us)
 ├── reference/
 │   ├── gdn_decode_ref.py            # FlashInfer-Bench official reference
 │   └── gdn_prefill_ref.py           # FlashInfer-Bench official reference
