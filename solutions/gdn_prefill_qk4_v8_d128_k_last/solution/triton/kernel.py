@@ -3,7 +3,7 @@ Triton GDN Prefill Kernel - gdn_prefill_qk4_v8_d128_k_last
 
 Gated Delta Net prefill with GVA configuration and k-last state layout.
 Core recurrence via FLA chunk_gated_delta_rule_fwd; fused Triton precompute
-for L2 norm of q/k, GVA head expansion, and gating (A_log, a, dt_bias, b → g, beta).
+for GVA head expansion, and gating (A_log, a, dt_bias, b -> g, beta).
 
 Config: num_q_heads=4, num_k_heads=4, num_v_heads=8, head_size=128
 State layout: k-last [num_seqs, HV, V, K]
@@ -33,19 +33,14 @@ def _fused_precompute_kernel(
 
     for i_h in range(H):
         qk_base = i_t * H * K + i_h * K
-        q_raw = tl.load(q_ptr + qk_base + k_offs).to(tl.float32)
-        k_raw = tl.load(k_ptr + qk_base + k_offs).to(tl.float32)
-
-        q_sq = tl.sum(q_raw * q_raw)
-        k_sq = tl.sum(k_raw * k_raw)
-        q_norm = q_raw * tl.math.rsqrt(q_sq + 1e-6)
-        k_norm = k_raw * tl.math.rsqrt(k_sq + 1e-6)
+        q_raw = tl.load(q_ptr + qk_base + k_offs)
+        k_raw = tl.load(k_ptr + qk_base + k_offs)
 
         for r in range(RATIO):
             i_hv = i_h * RATIO + r
             out_base = i_t * HV * K + i_hv * K
-            tl.store(q_out_ptr + out_base + k_offs, q_norm.to(tl.bfloat16))
-            tl.store(k_out_ptr + out_base + k_offs, k_norm.to(tl.bfloat16))
+            tl.store(q_out_ptr + out_base + k_offs, q_raw)
+            tl.store(k_out_ptr + out_base + k_offs, k_raw)
 
     for i_hv in range(HV):
         A_log_val = tl.load(A_log_ptr + i_hv)

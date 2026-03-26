@@ -1,8 +1,6 @@
-[solution]
-name = "my-team-solution-v1"      # Solution name
-definition = "fused_moe"          # Track: fused_moe | sparse_attention | gated_delta_net
-author = "team-name"              # Team/author name
+[project]
+track = "gated_delta_net"
+description = "Gated Delta Network kernels for FlashInfer AI Kernel Generation Contest @ MLSys 2026"
 
-[build]
-language = "triton"               # triton | cuda
-entry_point = "kernel"            # Kernel function name
+[solutions]
+directory = "solutions"

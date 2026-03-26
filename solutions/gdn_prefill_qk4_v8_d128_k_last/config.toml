@@ -5,5 +5,5 @@ author = "chengqi"
 
 [build]
 language = "triton"
-entry_point = "kernel"
+entry_point = "kernel.py::kernel"
 destination_passing_style = true

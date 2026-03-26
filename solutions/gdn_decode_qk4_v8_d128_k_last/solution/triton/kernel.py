@@ -8,14 +8,13 @@ Config: num_q_heads=4, num_k_heads=4, num_v_heads=8, head_size=128
 State layout: k-last [B, HV, V, K]
 
 Algorithm per (batch, v_head):
-  1. g = -exp(A_log) * softplus(a + dt_bias)
+  1. g = exp(-exp(A_log) * softplus(a + dt_bias))  -- decay factor
   2. beta = sigmoid(b)
-  3. L2-normalize q, k; apply scale to q
-  4. h *= exp(g)           -- decay state
-  5. pred = h @ k           -- [V,K] @ [K] -> [V]
-  6. v_new = (v - pred)*beta -- delta rule + gate
-  7. h += outer(v_new, k)   -- rank-1 update
-  8. out = h @ q             -- readout
+  3. h *= g                  -- decay state
+  4. pred = h @ k            -- [V,K] @ [K] -> [V]
+  5. v_new = (v - pred)*beta -- delta rule + gate
+  6. h += outer(v_new, k)    -- rank-1 update
+  7. out = scale * h @ q     -- readout
 """
 
 import torch
@@ -55,13 +54,8 @@ def _gdn_decode_kernel(
 
     k_offs = tl.arange(0, K)
     qk_base = i_n * H * K + i_h * K
-    q_raw = tl.load(q_ptr + qk_base + k_offs, eviction_policy="evict_last").to(tl.float32)
-    k_raw = tl.load(k_ptr + qk_base + k_offs, eviction_policy="evict_last").to(tl.float32)
-
-    q_sq = tl.sum(q_raw * q_raw)
-    k_sq = tl.sum(k_raw * k_raw)
-    q_vec = q_raw * (tl.math.rsqrt(q_sq + 1e-6) * scale)
-    k_vec = k_raw * tl.math.rsqrt(k_sq + 1e-6)
+    q_vec = tl.load(q_ptr + qk_base + k_offs, eviction_policy="evict_last").to(tl.float32)
+    k_vec = tl.load(k_ptr + qk_base + k_offs, eviction_policy="evict_last").to(tl.float32)
 
     v_range = i_v * BLOCK_V + tl.arange(0, BLOCK_V)
     v_base = i_n * HV * V + i_hv * V
@@ -79,7 +73,7 @@ def _gdn_decode_kernel(
 
     h = h + v_new[:, None] * k_vec[None, :]
 
-    out = tl.sum(h * q_vec[None, :], axis=1)
+    out = tl.sum(h * q_vec[None, :], axis=1) * scale
 
     o_base = (i_n * HV + i_hv) * V
     tl.store(output_ptr + o_base + v_range, out.to(tl.bfloat16))

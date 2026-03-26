@@ -1,10 +1,11 @@
 """Test GDN prefill kernel against sequential reference implementation."""
 
 import sys
+from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-sys.path.insert(0, "/home/chengqi/gated-delta-network/gdn_prefill_qk4_v8_d128_k_last/solution/triton")
+sys.path.insert(0, str(Path(__file__).parent.parent / "solutions" / "gdn_prefill_qk4_v8_d128_k_last" / "solution" / "triton"))
 from kernel import kernel as triton_prefill_kernel
 
 

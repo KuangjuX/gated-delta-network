@@ -185,9 +185,6 @@ def kernel(q, k, v, state, A_log, a, dt_bias, b, cu_seqlens, scale, output, new_
     k_expanded = k.repeat_interleave(ratio, dim=1).float()
     v_f = v.float()
 
-    q_expanded = F.normalize(q_expanded, p=2.0, dim=-1) * scale
-    k_expanded = F.normalize(k_expanded, p=2.0, dim=-1)
-
     # Pre-compute gating for all tokens
     g_all = torch.empty(total_seq_len, HV, dtype=torch.float32, device=q.device)
     beta_all = torch.empty(total_seq_len, HV, dtype=torch.float32, device=q.device)
@@ -242,7 +239,7 @@ def kernel(q, k, v, state, A_log, a, dt_bias, b, cu_seqlens, scale, output, new_
 
             _blockwise_prefill_fused(
                 q_blk, k_blk, v_blk, g_blk, beta_blk,
-                h_state, 1.0, block_size, valid_len, out_slice, seq_idx,
+                h_state, scale, block_size, valid_len, out_slice, seq_idx,
             )
 
             blk_offset += block_size

@@ -1,12 +1,14 @@
 """Test CUDA GDN decode kernel against reference and Triton."""
 import sys
+from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-sys.path.insert(0, "/home/chengqi/gated-delta-network/gdn_decode_qk4_v8_d128_k_last/solution/cuda")
+_base = Path(__file__).parent.parent / "solutions" / "gdn_decode_qk4_v8_d128_k_last" / "solution"
+sys.path.insert(0, str(_base / "cuda"))
 from binding import kernel as cuda_decode_kernel
 
-sys.path.insert(0, "/home/chengqi/gated-delta-network/gdn_decode_qk4_v8_d128_k_last/solution/triton")
+sys.path.insert(0, str(_base / "triton"))
 from kernel import kernel as triton_decode_kernel
 
 

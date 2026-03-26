@@ -54,7 +54,6 @@ __global__ void gdn_decode_kernel(
     float decay = expf(g);
     float beta_val = 1.0f / (1.0f + expf(-b_val));
 
-    // Load q, k vectors (4 elements per thread, coalesced)
     float q_reg[VEC_SIZE], k_reg[VEC_SIZE];
     const int qk_base = i_n * H * K_DIM + i_h * K_DIM + lane_id * VEC_SIZE;
 
@@ -62,26 +61,6 @@ __global__ void gdn_decode_kernel(
     for (int i = 0; i < VEC_SIZE; i++) {
         q_reg[i] = __bfloat162float(q_ptr[qk_base + i]);
         k_reg[i] = __bfloat162float(k_ptr[qk_base + i]);
-    }
-
-    // L2 normalize q (with scale) and k
-    float q_sq = 0.0f, k_sq = 0.0f;
-    #pragma unroll
-    for (int i = 0; i < VEC_SIZE; i++) {
-        q_sq += q_reg[i] * q_reg[i];
-        k_sq += k_reg[i] * k_reg[i];
-    }
-    #pragma unroll
-    for (int offset = 16; offset >= 1; offset >>= 1) {
-        q_sq += __shfl_xor_sync(0xffffffff, q_sq, offset);
-        k_sq += __shfl_xor_sync(0xffffffff, k_sq, offset);
-    }
-    float q_scale = rsqrtf(q_sq + 1e-6f) * scale;
-    float k_scale = rsqrtf(k_sq + 1e-6f);
-    #pragma unroll
-    for (int i = 0; i < VEC_SIZE; i++) {
-        q_reg[i] *= q_scale;
-        k_reg[i] *= k_scale;
     }
 
     // Each warp processes BLOCK_V/NUM_WARPS V-rows
@@ -139,9 +118,8 @@ __global__ void gdn_decode_kernel(
             sum_hq += __shfl_xor_sync(0xffffffff, sum_hq, offset);
         }
 
-        // Store output
         if (lane_id == 0) {
-            output_ptr[i_n * HV * V + i_hv * V + v_idx] = __float2bfloat16(sum_hq);
+            output_ptr[i_n * HV * V + i_hv * V + v_idx] = __float2bfloat16(sum_hq * scale);
         }
 
         // Store new state
