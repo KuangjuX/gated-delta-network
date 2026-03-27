@@ -123,7 +123,7 @@ def bench_prefill():
     from gdn_prefill_ref import run as ref_prefill
 
     sys.path.insert(0, str(PROJECT_ROOT / "solutions" / "gdn_prefill_qk4_v8_d128_k_last" / "solution" / "triton"))
-    from kernel import kernel as triton_prefill
+    from fla_kernels import kernel as triton_prefill
 
     H, HV, K, V = 4, 8, 128, 128
     device = "cuda"

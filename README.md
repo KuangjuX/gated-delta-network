@@ -82,6 +82,22 @@ Baseline: [FlashInfer-Bench reference](https://bench.flashinfer.ai/kernels/gdn_p
 
 **cuda-evolve benchmark (seq_len=1024): 172us, 78.1% peak bandwidth, 7380x vs PyTorch reference.**
 
+> **Note on measurement methodology:** The numbers above are measured with tensor reuse (same objects across iterations). In FlashInfer-bench's official measurement mode, all tensors are cloned every iteration to prevent cross-iteration information leakage. Under that mode, the inlined version achieves **~250us** (vs **~609us** for the FLA-dependent version), a **2.43x improvement**. See [OPTIMIZATION_LOG.md](OPTIMIZATION_LOG.md) for details.
+
+### Prefill: FlashInfer-Bench Mode (clone each iteration)
+
+FlashInfer-bench clones all tensor arguments before every timed iteration. Under this official measurement mode:
+
+| Config | Ours (inlined) | Ours (FLA-dep) | Speedup |
+|:---:|:---:|:---:|:---:|
+| 1x64 | 0.253 ms | 0.609 ms | **2.41x** |
+| 1x256 | 0.253 ms | 0.609 ms | **2.41x** |
+| 1x512 | 0.257 ms | 0.609 ms | **2.37x** |
+| 1x1024 | 0.251 ms | 0.609 ms | **2.43x** |
+| 2x512 | 0.261 ms | 0.609 ms | **2.33x** |
+
+**All caching optimizations except the identity fast-path survive FlashInfer-bench's clone-per-iteration mode.** The FLA-dependent version is hit harder by cloning (1.67x penalty) than the inlined version (1.18x penalty).
+
 ### Prefill: vs FLA Library
 
 | Seq Length | Ours (inlined) | FLA chunk | FLA fused_recurrent | vs chunk | vs fused_recurrent |

@@ -1043,3 +1043,10 @@ def kernel_fn(q, k, v, state, A_log, a, dt_bias, b, cu_seqlens, scale):
     )
 
     return o_buf.squeeze(0), final_state
+
+
+def kernel(q, k, v, state, A_log, a, dt_bias, b, cu_seqlens, scale, output, new_state):
+    """DPS entry point for FlashInfer-Bench."""
+    o, fs = kernel_fn(q, k, v, state, A_log, a, dt_bias, b, cu_seqlens, scale)
+    output.copy_(o)
+    new_state.copy_(fs)
