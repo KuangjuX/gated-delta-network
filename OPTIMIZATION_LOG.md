@@ -141,7 +141,13 @@ The prefill kernel went through four major phases:
    - Cumulative sum (`g_cs`) stays in registers instead of HBM write + read
    - Saves 1 kernel launch (~30us Triton dispatch overhead after autotuning)
 
-8. **CUDA graph capture attempt** (reverted):
+8. **Ai buffer zero-initialization fix** (205us → 172us range preserved):
+   - `solve_tril` only writes the 10 lower-triangular 16×16 blocks of the 64×64 inverse; the 6 upper-triangular blocks must be zero
+   - Original `_get_buf('Ai', ..., zero=True)` only zeroed on first allocation; buffer reuse across workloads with same T but different `cu_seqlens` left stale upper-triangular values
+   - Fixed by explicit `Ai.zero_()` before each `solve_tril` call (~1us overhead for 8MB buffer at 8 TB/s)
+   - Without fix: INCORRECT_NUMERICAL on 2+ workloads in FlashInfer-bench; with fix: 100/100 PASS
+
+9. **CUDA graph capture attempt** (reverted):
    - Tried `torch.cuda.CUDAGraph` to capture the 6-kernel pipeline
    - Failed: `cudaErrorStreamCaptureInvalidated` — Triton's autotuner dispatch involves D2H copies and Python operations incompatible with graph capture
    - Triton's JIT/autotuner adds ~30us per kernel dispatch even after configs are cached
@@ -218,6 +224,17 @@ All implementations pass comprehensive correctness tests:
 ## 5. FlashInfer-Bench Evaluation
 
 All kernels evaluated against the [FlashInfer-Bench reference implementations](https://bench.flashinfer.ai/) on NVIDIA B200.
+
+### Prefill (100/100 workloads PASSED)
+
+**Inlined self-contained version (`fla_kernels.py`, entry point for FlashInfer-Bench):**
+
+| Seq Length Range | Workloads | Avg Latency | Correctness |
+|:---:|:---:|:---:|:---:|
+| 6 - 49 | 28 | 0.401 ms | 28/28 PASS |
+| 61 - 294 | 26 | 0.409 ms | 26/26 PASS |
+| 341 - 1800 | 24 | 0.443 ms | 24/24 PASS |
+| 2040 - 8192 | 22 | 0.600 ms | 22/22 PASS |
 
 ### Decode (54/54 workloads PASSED)
 

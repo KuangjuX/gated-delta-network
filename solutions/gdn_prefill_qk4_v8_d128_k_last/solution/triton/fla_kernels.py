@@ -1006,7 +1006,8 @@ def kernel_fn(q, k, v, state, A_log, a, dt_bias, b, cu_seqlens, scale):
         T=T, H=HV, K=K, BT=BT,
     )
 
-    Ai = _get_buf('Ai', (1, T, HV, BT), torch.bfloat16, dev, zero=True)
+    Ai = _get_buf('Ai', (1, T, HV, BT), torch.bfloat16, dev)
+    Ai.zero_()
     solve_tril_64x64_kernel[NT, HV](
         A=A_mat, Ai=Ai, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
         T=T, H=HV, BT=BT,

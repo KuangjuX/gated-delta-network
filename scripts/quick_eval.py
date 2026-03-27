@@ -20,6 +20,7 @@ def main():
     parser.add_argument("solution_name")
     parser.add_argument("--full", action="store_true", help="Run all workloads (default: first 5)")
     parser.add_argument("--n", type=int, default=5, help="Number of workloads to test")
+    parser.add_argument("--skip-ref", action="store_true", help="Skip reference baseline profiling (much faster)")
     args = parser.parse_args()
 
     dataset_path = os.environ.get("FIB_DATASET_PATH", "/home/chengqi/mlsys26-contest")
@@ -40,7 +41,10 @@ def main():
 
     print(f"Testing {len(workloads)} / {len(all_workloads)} workloads\n")
 
-    config = BenchmarkConfig(warmup_runs=2, iterations=20, num_trials=3)
+    config = BenchmarkConfig(
+        warmup_runs=2, iterations=20, num_trials=3,
+        profile_baseline=not args.skip_ref,
+    )
 
     bench_ts = TraceSet(
         root=trace_set.root,

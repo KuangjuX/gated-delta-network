@@ -50,6 +50,17 @@ Baseline: [FlashInfer-Bench reference](https://bench.flashinfer.ai/kernels/gdn_d
 
 **FlashInfer-Bench full evaluation: 54/54 workloads PASSED** (avg speedup 529x, max 1469x).
 
+### Prefill: FlashInfer-Bench Official Evaluation
+
+**100/100 workloads PASSED** (inlined `fla_kernels.py`, avg latency 0.463ms).
+
+| Seq Length Range | Workloads | Avg Latency | Correctness |
+|:---:|:---:|:---:|:---:|
+| 6 - 49 | 28 | 0.401 ms | 28/28 PASS |
+| 61 - 294 | 26 | 0.409 ms | 26/26 PASS |
+| 341 - 1800 | 24 | 0.443 ms | 24/24 PASS |
+| 2040 - 8192 | 22 | 0.600 ms | 22/22 PASS |
+
 ### Decode: vs FlashInfer-Bench Reference (per batch_size group)
 
 Aggregate results from FlashInfer-Bench with all 54 official workloads:
